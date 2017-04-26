@@ -54,6 +54,17 @@ class DefaultTaskExecutionPlanTest extends AbstractProjectBuilderSpec {
     def setup() {
         root = createRootProject(temporaryFolder.testDirectory);
         executionPlan = new DefaultTaskExecutionPlan(cancellationHandler, coordinationService, workerLeaseService)
+        _ * parentWorkerLease.createChild() >> Mock(WorkerLeaseRegistry.WorkerLease) {
+            _ * tryLock() >> true
+        }
+        _ * workerLeaseService.getProjectLock(_, _) >> Mock(ResourceLock) {
+            _ * isLocked() >> false
+            _ * tryLock() >> true
+        }
+        _ * coordinationService.withStateLock(_) >> { args ->
+            args[0].transform(Mock(ResourceLockState))
+            return true
+        }
     }
 
     def "schedules tasks in dependency order"() {
@@ -878,16 +889,6 @@ class DefaultTaskExecutionPlanTest extends AbstractProjectBuilderSpec {
 
     def getExecutedTasks() {
         def tasks = []
-        _ * parentWorkerLease.createChild() >> Mock(WorkerLeaseRegistry.WorkerLease) {
-            _ * tryLock() >> true
-        }
-        _ * workerLeaseService.getProjectLock(_, _) >> Mock(ResourceLock) {
-            _ * tryLock() >> true
-        }
-        _ * coordinationService.withStateLock(_) >> { args ->
-            args[0].transform(Mock(ResourceLockState))
-            return true
-        }
         def moreTasks = true
         while (moreTasks) {
             moreTasks = executionPlan.executeWithTask(parentWorkerLease, new Action<TaskInfo>() {
