@@ -506,7 +506,6 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
     @Override
     public boolean executeWithTask(final WorkerLease workerLease, final Action<TaskInfo> taskExecution) {
         final AtomicReference<TaskInfo> selected = new AtomicReference<TaskInfo>();
-        final AtomicBoolean canExecute = new AtomicBoolean();
         final AtomicBoolean workRemaining = new AtomicBoolean();
         coordinationService.withStateLock(new Transformer<ResourceLockState.Disposition, ResourceLockState>() {
             @Override
@@ -531,40 +530,7 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
                     return RETRY;
                 }
 
-                final Iterator<TaskInfo> iterator = executionQueue.iterator();
-                while (iterator.hasNext()) {
-                    final TaskInfo taskInfo = iterator.next();
-                    if (taskInfo.isReady() && taskInfo.allDependenciesComplete()) {
-                        coordinationService.withStateLock(new Transformer<ResourceLockState.Disposition, ResourceLockState>() {
-                            @Override
-                            public ResourceLockState.Disposition transform(ResourceLockState resourceLockState) {
-                                ResourceLock projectLock = getProjectLock(taskInfo);
-                                if (!projectLock.tryLock()) {
-                                    return FAILED;
-                                }
-                                // TODO: convert output file checks to a resource lock
-                                if (!canRunWithWithCurrentlyExecutedTasks(taskInfo)) {
-                                    return FAILED;
-                                }
-
-                                selected.set(taskInfo);
-                                iterator.remove();
-                                if (taskInfo.allDependenciesSuccessful()) {
-                                    taskInfo.startExecution();
-                                    recordTaskStarted(taskInfo);
-                                    canExecute.set(true);
-                                } else {
-                                    taskInfo.skipExecution();
-                                }
-                                return FINISHED;
-                            }
-                        });
-
-                        if (selected.get() != null) {
-                            break;
-                        }
-                    }
-                }
+                selected.set(selectNextTask());
 
                 if (selected.get() == null && workRemaining.get()) {
                     workerLease.unlock();
@@ -578,21 +544,63 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
 
         try {
             if (selected.get() != null) {
-                try {
-                    if (canExecute.get()) {
-                        taskExecution.execute(selected.get());
-                    }
-                } finally {
-                    TaskInfo taskInfo = selected.get();
-                    ResourceLock projectLock = getProjectLock(taskInfo);
-                    coordinationService.withStateLock(unlock(projectLock));
-                }
+                TaskInfo taskInfo = selected.get();
+                execute(taskInfo, taskExecution);
             }
         } finally {
             coordinationService.withStateLock(unlock(workerLease));
         }
 
         return workRemaining.get();
+    }
+
+    private TaskInfo selectNextTask() {
+        final AtomicReference<TaskInfo> selected = new AtomicReference<TaskInfo>();
+        final Iterator<TaskInfo> iterator = executionQueue.iterator();
+        while (iterator.hasNext()) {
+            final TaskInfo taskInfo = iterator.next();
+            if (taskInfo.isReady() && taskInfo.allDependenciesComplete()) {
+                coordinationService.withStateLock(new Transformer<ResourceLockState.Disposition, ResourceLockState>() {
+                    @Override
+                    public ResourceLockState.Disposition transform(ResourceLockState resourceLockState) {
+                        ResourceLock projectLock = getProjectLock(taskInfo);
+                        if (!projectLock.tryLock()) {
+                            return FAILED;
+                        }
+                        // TODO: convert output file checks to a resource lock
+                        if (!canRunWithCurrentlyExecutedTasks(taskInfo)) {
+                            return FAILED;
+                        }
+
+                        selected.set(taskInfo);
+                        iterator.remove();
+                        if (taskInfo.allDependenciesSuccessful()) {
+                            taskInfo.startExecution();
+                            recordTaskStarted(taskInfo);
+                        } else {
+                            taskInfo.skipExecution();
+                        }
+                        return FINISHED;
+                    }
+                });
+
+                if (selected.get() != null) {
+                    break;
+                }
+            }
+        }
+        return selected.get();
+    }
+
+    private void execute(TaskInfo taskInfo, Action<TaskInfo> taskExecution) {
+        try {
+            if (!taskInfo.isComplete()) {
+                taskExecution.execute(taskInfo);
+            }
+        } finally {
+            ResourceLock projectLock = getProjectLock(taskInfo);
+            coordinationService.withStateLock(unlock(projectLock));
+        }
     }
 
     private boolean allProjectsLocked() {
@@ -615,7 +623,7 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
         return workerLeaseService.getProjectLock(gradlePath, projectPath);
     }
 
-    private boolean canRunWithWithCurrentlyExecutedTasks(TaskInfo taskInfo) {
+    private boolean canRunWithCurrentlyExecutedTasks(TaskInfo taskInfo) {
         TaskInternal task = taskInfo.getTask();
 
         Pair<TaskInternal, String> overlap = firstTaskWithOverlappingOutput(task);
