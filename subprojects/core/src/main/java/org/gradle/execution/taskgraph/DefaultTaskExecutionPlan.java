@@ -504,11 +504,10 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
     }
 
     @Override
-    public boolean executeWithTask(final WorkerLease parentWorkerLease, final Action<TaskInfo> taskExecution) {
+    public boolean executeWithTask(final WorkerLease workerLease, final Action<TaskInfo> taskExecution) {
         final AtomicReference<TaskInfo> selected = new AtomicReference<TaskInfo>();
         final AtomicBoolean canExecute = new AtomicBoolean();
         final AtomicBoolean workRemaining = new AtomicBoolean();
-        final AtomicReference<ResourceLock> workerLease = new AtomicReference<ResourceLock>();
         coordinationService.withStateLock(new Transformer<ResourceLockState.Disposition, ResourceLockState>() {
             @Override
             public ResourceLockState.Disposition transform(ResourceLockState resourceLockState) {
@@ -523,7 +522,12 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
                     return FINISHED;
                 }
 
+                if (!workerLease.tryLock()) {
+                    return RETRY;
+                }
+
                 if (allProjectsLocked()) {
+                    workerLease.unlock();
                     return RETRY;
                 }
 
@@ -538,13 +542,11 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
                                 if (!projectLock.tryLock()) {
                                     return FAILED;
                                 }
-                                WorkerLease childLease = parentWorkerLease.createChild();
                                 // TODO: convert output file checks to a resource lock
-                                if (!childLease.tryLock() || !canRunWithWithCurrentlyExecutedTasks(taskInfo)) {
+                                if (!canRunWithWithCurrentlyExecutedTasks(taskInfo)) {
                                     return FAILED;
                                 }
 
-                                workerLease.set(childLease);
                                 selected.set(taskInfo);
                                 iterator.remove();
                                 if (taskInfo.allDependenciesSuccessful()) {
@@ -565,6 +567,7 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
                 }
 
                 if (selected.get() == null && workRemaining.get()) {
+                    workerLease.unlock();
                     return RETRY;
                 } else {
                     return FINISHED;
@@ -573,16 +576,20 @@ public class DefaultTaskExecutionPlan implements TaskExecutionPlan {
         });
 
 
-        if (selected.get() != null) {
-            try {
-                if (canExecute.get()) {
-                    taskExecution.execute(selected.get());
+        try {
+            if (selected.get() != null) {
+                try {
+                    if (canExecute.get()) {
+                        taskExecution.execute(selected.get());
+                    }
+                } finally {
+                    TaskInfo taskInfo = selected.get();
+                    ResourceLock projectLock = getProjectLock(taskInfo);
+                    coordinationService.withStateLock(unlock(projectLock));
                 }
-            } finally {
-                TaskInfo taskInfo = selected.get();
-                ResourceLock projectLock = getProjectLock(taskInfo);
-                coordinationService.withStateLock(unlock(projectLock, workerLease.get()));
             }
+        } finally {
+            coordinationService.withStateLock(unlock(workerLease));
         }
 
         return workRemaining.get();

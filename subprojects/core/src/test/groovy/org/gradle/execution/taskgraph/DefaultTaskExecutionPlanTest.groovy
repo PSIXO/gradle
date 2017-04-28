@@ -49,18 +49,16 @@ class DefaultTaskExecutionPlanTest extends AbstractProjectBuilderSpec {
     def cancellationHandler = Mock(BuildCancellationToken)
     def workerLeaseService = Mock(WorkerLeaseService)
     def coordinationService = Mock(ResourceLockCoordinationService)
-    def parentWorkerLease = Mock(WorkerLeaseRegistry.WorkerLease)
+    def workerLease = Mock(WorkerLeaseRegistry.WorkerLease)
 
     def setup() {
         root = createRootProject(temporaryFolder.testDirectory);
         executionPlan = new DefaultTaskExecutionPlan(cancellationHandler, coordinationService, workerLeaseService)
-        _ * parentWorkerLease.createChild() >> Mock(WorkerLeaseRegistry.WorkerLease) {
-            _ * tryLock() >> true
-        }
         _ * workerLeaseService.getProjectLock(_, _) >> Mock(ResourceLock) {
             _ * isLocked() >> false
             _ * tryLock() >> true
         }
+        _ * workerLease.tryLock() >> true
         _ * coordinationService.withStateLock(_) >> { args ->
             args[0].transform(Mock(ResourceLockState))
             return true
@@ -891,7 +889,7 @@ class DefaultTaskExecutionPlanTest extends AbstractProjectBuilderSpec {
         def tasks = []
         def moreTasks = true
         while (moreTasks) {
-            moreTasks = executionPlan.executeWithTask(parentWorkerLease, new Action<TaskInfo>() {
+            moreTasks = executionPlan.executeWithTask(workerLease, new Action<TaskInfo>() {
                 @Override
                 void execute(TaskInfo taskInfo) {
                     tasks << taskInfo.task
